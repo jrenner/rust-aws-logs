@@ -1,4 +1,3 @@
-use std::ops::Deref;
 use clap::Parser;
 
 use serde::{Deserialize, Serialize};
@@ -161,8 +160,9 @@ fn main() {
     let full_log_text = get_text_from_events(&events);
     println!("FULL LOG TEXT:\n{full_log_text}");
 
-    if let Some(output_file) = output_file {
-        println!("writing to file: {output_file}");
-        std::fs::write(output_file, full_log_text).expect(format!("Unable to write file: {output_file}").as_str());
+    if let Some(fpath) = output_file {
+        let error_msg = format!("Unable to write file: {fpath}");
+        println!("writing to file: {fpath}");
+        std::fs::write(&fpath, full_log_text).expect(&error_msg);
     }
 }
