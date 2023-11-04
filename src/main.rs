@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use clap::Parser;
 
 use serde::{Deserialize, Serialize};
@@ -7,8 +8,14 @@ use std::str;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    #[arg(short='s', long)]
+    log_stream: String,
+
+    #[arg(short='g', long)]
+    log_group: String,
+
     #[arg(short, long)]
-    logstream_id: String,
+    output_file: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -74,12 +81,13 @@ fn fetch_single_log_page(log_group: &str, log_stream: &str, fwd_token: Option<&s
     jdat
 }
 
-fn fetch_entire_log() -> Vec<Event> {
-    let args = Args::parse();
-    let stage = "dev";
-    let logstream_id = args.logstream_id;
-    let log_group = format!("/ecs/batte-backcast-{stage}");
-    let log_stream = format!("ecs/batte-backcast-{stage}/{logstream_id}");
+fn fetch_entire_log(log_group: &str, log_stream: &str) -> Vec<Event> {
+
+    // throw error if log_stream begins with "/"
+    if log_stream.starts_with("/") {
+        panic!("log_stream should probably not begin with / -> {log_stream}");
+    }
+
     println!("fetch entire log - log_group: {log_group}, log_stream: {log_stream}");
     let mut i = 0;
     let mut current_token: Option<String> = None;
@@ -107,7 +115,7 @@ fn fetch_entire_log() -> Vec<Event> {
     all_events
 }
 
-fn fetch_entire_log_cached(use_cached: bool) -> Vec<Event> {
+fn fetch_entire_log_cached(log_group: &str, log_stream: &str, use_cached: bool) -> Vec<Event> {
     let jdat: Vec<Event>;
     if use_cached {
         // try to read cached data from /tmp/aws_log_cache.json
@@ -119,11 +127,11 @@ fn fetch_entire_log_cached(use_cached: bool) -> Vec<Event> {
             }
             Err(_) => {
                 println!("no cached data found, running command");
-                jdat = fetch_entire_log();
+                jdat = fetch_entire_log(log_group, log_stream);
             }
         }
     } else {
-        jdat = fetch_entire_log();
+        jdat = fetch_entire_log(log_group, log_stream);
         // now serialize it back into a string
         let serialized = serde_json::to_string(&jdat).unwrap();
         // now write to /tmp/aws_log_cache.json
@@ -142,8 +150,19 @@ fn get_text_from_events(events: &Vec<Event>) -> String {
 }
 
 fn main() {
+    let args = Args::parse();
+
+    let log_group = args.log_group;
+    let log_stream = args.log_stream;
+    let output_file = args.output_file;
+
     let use_cached = false;
-    let events: Vec<Event> = fetch_entire_log_cached(use_cached);
+    let events: Vec<Event> = fetch_entire_log_cached(&log_group, &log_stream, use_cached);
     let full_log_text = get_text_from_events(&events);
-    println!("FULL LOG TEXT:\n{full_log_text}")
+    println!("FULL LOG TEXT:\n{full_log_text}");
+
+    if let Some(output_file) = output_file {
+        println!("writing to file: {output_file}");
+        std::fs::write(output_file, full_log_text).expect(format!("Unable to write file: {output_file}").as_str());
+    }
 }
