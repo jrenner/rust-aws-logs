@@ -21,16 +21,6 @@ struct EventLog {
     next_backward_token: String,
 }
 
-impl EventLog {
-    fn new() -> EventLog {
-        EventLog {
-            events: Vec::new(),
-            next_forward_token: String::new(),
-            next_backward_token: String::new(),
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Event {
     #[serde(rename = "timestamp")]
@@ -95,7 +85,8 @@ fn fetch_entire_log() -> Vec<Event> {
     let mut current_token: Option<String> = None;
     let mut all_events = Vec::new();
     loop {
-        let jdat: EventLog = fetch_single_log_page(&log_group, &log_stream, current_token.as_deref());
+        let jdat: EventLog =
+            fetch_single_log_page(&log_group, &log_stream, current_token.as_deref());
         // append all the events to all_events
         all_events.extend(jdat.events);
         let forward_token: &str = &jdat.next_forward_token;
@@ -142,18 +133,17 @@ fn fetch_entire_log_cached(use_cached: bool) -> Vec<Event> {
 }
 
 fn get_text_from_events(events: &Vec<Event>) -> String {
-    let text: String = events.iter().map(|e| e.message.clone()).collect::<Vec<String>>().join("\n");
+    let text: String = events
+        .iter()
+        .map(|e| e.message.clone())
+        .collect::<Vec<String>>()
+        .join("\n");
     text
 }
 
 fn main() {
     let use_cached = false;
-    let jdat: EventLog = fetch_entire_log_cached(use_cached);
-
-    // loop through events an extract all the "message" fields, and store them in a data structure
-    let mut messages: Vec<String> = Vec::new();
-    for event in jdat.events {
-        messages.push(event.message);
-    }
-    println!("{:#?}", messages);
+    let events: Vec<Event> = fetch_entire_log_cached(use_cached);
+    let full_log_text = get_text_from_events(&events);
+    println!("FULL LOG TEXT:\n{full_log_text}")
 }
