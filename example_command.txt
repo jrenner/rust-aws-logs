@@ -1,1 +1,0 @@
-cargo run -- --log-stream ecs/batte-backcast-dev/1c0f400e696b4abbb5dbe477d2c71407 --log-group /ecs/batte-backcast-dev
