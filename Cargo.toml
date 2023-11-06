@@ -11,3 +11,7 @@ env_logger = "0.10.0"
 log = "0.4.20"
 serde = { version = "1.0.190", features = ["derive"] }
 serde_json = "1.0.108"
+
+[[bin]]
+name = "alog"
+path = "src/main.rs"

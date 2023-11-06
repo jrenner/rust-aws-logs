@@ -188,9 +188,9 @@ fn fetch_entire_log(log_group: &str, log_stream: &str) -> Vec<Event> {
     all_events
 }
 
-fn fetch_entire_log_cached(log_group: &str, log_stream: &str, use_cached: bool) -> Vec<Event> {
+fn fetch_entire_log_cached(log_group: &str, log_stream: &str, use_cache: bool) -> Vec<Event> {
     let events: Vec<Event>;
-    if use_cached {
+    if use_cache {
         let cache_dir = env::temp_dir().join("aws_log_cache");
         let log_group_safe = clean_path_str(log_group);
         let log_stream_safe = clean_path_str(log_stream);
@@ -322,10 +322,17 @@ fn main() {
         return;
     }
 
-    let log_stream = args.log_stream.unwrap();
+    let log_stream = args.log_stream.expect("log-stream argument not supplied");
 
-    let use_cached = true;
-    let events: Vec<Event> = fetch_entire_log_cached(&log_group, &log_stream, use_cached);
+    let use_cache = env::var("ALOG_USE_CACHE")
+        .ok()
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(false);
+
+    println!("The value of use_cache is: {}", use_cache);
+
+
+    let events: Vec<Event> = fetch_entire_log_cached(&log_group, &log_stream, use_cache);
     let full_log_text = get_text_from_events(&events);
 
     if let Some(fpath) = args.output_file {
@@ -333,6 +340,6 @@ fn main() {
         info!("writing to file: {fpath}");
         std::fs::write(&fpath, full_log_text).expect(&error_msg);
     } else {
-        info!("FULL LOG TEXT:\n{full_log_text}");
+        println!("FULL LOG TEXT:\n{full_log_text}");
     }
 }
