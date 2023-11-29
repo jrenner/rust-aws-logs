@@ -6,6 +6,7 @@ use std::env;
 use std::path::Path;
 use std::process::Command;
 use std::str;
+use aws_config::BehaviorVersion;
 
 use rayon::prelude::*;
 
@@ -102,16 +103,6 @@ fn clean_path_str(path: &str) -> String {
         }
     }
     clean_path
-}
-
-fn verify_aws_cli_tool_available() {
-    debug!("looking for aws cli tool...");
-    let mut cmd = Command::new("aws");
-    cmd.arg("--version");
-    let output = cmd.output().expect("failed to execute process");
-    if !output.status.success() {
-        panic!("aws cli tool not available");
-    }
 }
 
 fn fetch_single_log_page(
@@ -266,32 +257,6 @@ fn get_text_from_events(events: &[Event]) -> String {
     text
 }
 
-fn get_sorted_log_group_names() -> Result<Vec<String>, String> {
-    let mut cmd = Command::new("aws");
-    cmd.args(&["logs", "describe-log-groups"]);
-
-    let output = cmd
-        .output()
-        .expect("failed to execute aws logs describe-log-groups");
-    if !output.status.success() {
-        let stderr = str::from_utf8(&output.stderr).unwrap();
-        return Err(stderr.to_string());
-    }
-
-    let stdout = str::from_utf8(&output.stdout).unwrap();
-    let log_groups_response: LogGroupsResponse =
-        serde_json::from_str(stdout).map_err(|e| e.to_string())?;
-
-    let mut log_group_names: Vec<String> = log_groups_response
-        .log_groups
-        .into_iter()
-        .map(|group| group.log_group_name)
-        .collect();
-
-    log_group_names.sort(); // Sorts alphabetically by default
-
-    Ok(log_group_names)
-}
 
 fn get_sorted_log_stream_names(log_group: &str) -> Result<Vec<String>, String> {
     let mut cmd = Command::new("aws");
@@ -328,19 +293,44 @@ fn get_sorted_log_stream_names(log_group: &str) -> Result<Vec<String>, String> {
 
 fn init_thread_pool() {
     // it's not cpu intensive, but we want to do a ton at once
-    let num_threads = 100;
+    let num_threads = 20;
     ThreadPoolBuilder::new().num_threads(num_threads).build_global().unwrap();
 }
 
-fn main() {
-    env_logger::init();
-    verify_aws_cli_tool_available();
-    let args = Args::parse();
+async fn get_cloudwatch_client() -> aws_sdk_cloudwatchlogs::Client {
+    let config =
+        aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
+    let client = aws_sdk_cloudwatchlogs::Client::new(&config);
+    client
+}
 
+async fn get_sorted_log_group_names(client: &aws_sdk_cloudwatchlogs::Client) -> Result<Vec<String>, String> {
+    let log_groups_output = client.describe_log_groups().send().await.unwrap();
+    let log_groups_option = log_groups_output.log_groups;
+    if log_groups_option.is_none() {
+        return Err("log_groups_option is None".to_string());
+    } else {
+        // get all log group names sorted by alphabetical
+        let mut log_group_names: Vec<String> = log_groups_option
+            .unwrap()
+            .into_iter()
+            .map(|group| group.log_group_name.unwrap())
+            .collect();
+        log_group_names.sort(); // Sorts alphabetically by default
+        Ok(log_group_names)
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    env_logger::init();
+    let args = Args::parse();
     init_thread_pool();
+    let cwl_client = get_cloudwatch_client().await;
+    let client = &cwl_client;
 
     if args.describe_log_groups {
-        let log_group_names = get_sorted_log_group_names().unwrap();
+        let log_group_names = get_sorted_log_group_names(client).await.unwrap();
         println!("Log Groups:");
         for name in log_group_names {
             println!("{}", name);
