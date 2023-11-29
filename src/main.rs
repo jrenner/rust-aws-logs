@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use clap::Parser;
 
 use serde::{Deserialize, Serialize};
@@ -6,25 +7,37 @@ use std::path::Path;
 use std::process::Command;
 use std::str;
 
+use rayon::prelude::*;
+
 use log::{debug, error, info};
+use rayon::ThreadPoolBuilder;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// list log groups in this AWS account
     #[arg(long, action = clap::ArgAction::SetTrue)]
     describe_log_groups: bool,
 
+    /// list log streams in this log group
     #[arg(long, action = clap::ArgAction::SetTrue)]
     describe_log_streams: bool,
 
+    /// log stream to fetch contents of
     #[arg(short = 's', long)]
     log_stream: Option<String>,
 
+    /// log group
     #[arg(short = 'g', long)]
     log_group: Option<String>,
 
+    /// output file to write to
     #[arg(short, long)]
     output_file: Option<String>,
+
+    /// get previews of the log streams when listing log groups
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    preview: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -92,6 +105,7 @@ fn clean_path_str(path: &str) -> String {
 }
 
 fn verify_aws_cli_tool_available() {
+    debug!("looking for aws cli tool...");
     let mut cmd = Command::new("aws");
     cmd.arg("--version");
     let output = cmd.output().expect("failed to execute process");
@@ -104,8 +118,10 @@ fn fetch_single_log_page(
     log_group: &str,
     log_stream: &str,
     fwd_token: Option<&str>,
+    limit: Option<i32>,
 ) -> Result<EventLog, String> {
-    let limit = "10000";
+    println!("fetch preview for: {log_stream}");
+    let limit_txt = limit.unwrap_or(10000).to_string();
 
     let mut args = vec![
         "logs",
@@ -116,7 +132,7 @@ fn fetch_single_log_page(
         log_group,
         "--start-from-head",
         "--limit",
-        limit,
+        &limit_txt,
     ];
 
     if let Some(token) = fwd_token {
@@ -147,6 +163,23 @@ fn fetch_single_log_page(
     }
 }
 
+fn fetch_first_n_events(log_group: &str, log_stream: &str, limit: i32) -> Vec<Event> {
+    if log_stream.starts_with("/") {
+        panic!("log_stream should probably not begin with / -> {log_stream}");
+    }
+    info!("fetch first N events from log stream - log_group: {log_group}, log_stream: {log_stream}");
+    let fwd_token: Option<&str> = None;
+    let event_log: EventLog =
+        fetch_single_log_page(&log_group, &log_stream, fwd_token, Some(limit))
+            .unwrap_or_else(|e| panic!("failed to fetch single log page: {}", e));
+    // append all the events to all_events
+    let page_size = event_log.events.len();
+    info!("fetched single page, size: {page_size}, limit was: {limit}");
+    let mut all_events = event_log.events;
+    all_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    all_events
+}
+
 fn fetch_entire_log(log_group: &str, log_stream: &str) -> Vec<Event> {
     if log_stream.starts_with("/") {
         panic!("log_stream should probably not begin with / -> {log_stream}");
@@ -157,8 +190,9 @@ fn fetch_entire_log(log_group: &str, log_stream: &str) -> Vec<Event> {
     let mut current_token: Option<String> = None;
     let mut all_events = Vec::new();
     loop {
+        let limit: Option<i32> = None;
         let event_log: EventLog =
-            fetch_single_log_page(&log_group, &log_stream, current_token.as_deref())
+            fetch_single_log_page(&log_group, &log_stream, current_token.as_deref(), limit)
                 .unwrap_or_else(|e| panic!("failed to fetch single log page: {}", e));
         // append all the events to all_events
         let page_size = event_log.events.len();
@@ -292,10 +326,18 @@ fn get_sorted_log_stream_names(log_group: &str) -> Result<Vec<String>, String> {
     Ok(log_stream_names)
 }
 
+fn init_thread_pool() {
+    // it's not cpu intensive, but we want to do a ton at once
+    let num_threads = 100;
+    ThreadPoolBuilder::new().num_threads(num_threads).build_global().unwrap();
+}
+
 fn main() {
     env_logger::init();
     verify_aws_cli_tool_available();
     let args = Args::parse();
+
+    init_thread_pool();
 
     if args.describe_log_groups {
         let log_group_names = get_sorted_log_group_names().unwrap();
@@ -315,9 +357,37 @@ fn main() {
             println!("Error: {}", e);
             std::process::exit(1);
         });
+        let mut logstream_previews: HashMap<String, String> = HashMap::new();
+        if args.preview {
+            // get the first 10 lines from each log stream of the last few log streams
+            let preview_amount = 9999999999999;
+            let preview_log_stream_names = log_stream_names
+                .iter()
+                .rev()
+                .take(preview_amount)
+                .map(|s| s.as_str())
+                .collect::<Vec<&str>>();
+
+            logstream_previews = preview_log_stream_names.par_iter().map(|log_stream| {
+                let n = 10;
+                let events = fetch_first_n_events(&log_group, log_stream.to_string().as_str(), n);
+                let text = get_text_from_events(&events);
+                (log_stream.to_string(), text)
+            }).collect::<HashMap<_, _>>();
+        }
         println!("Log Streams (log group: {log_group}):");
         for name in log_stream_names {
-            println!("{}", name);
+            if args.preview {
+                println!("\n------------------\n{}", name);
+                // check if it's in the hashmap
+                let is_in_hashmap = logstream_previews.contains_key(&name);
+                if is_in_hashmap {
+                    let preview = logstream_previews.get(&name).unwrap();
+                    println!("PREVIEW:\n{}", preview);
+                }
+            } else {
+                println!("{}", name);
+            }
         }
         return;
     }
