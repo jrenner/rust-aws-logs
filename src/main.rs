@@ -258,7 +258,38 @@ fn get_text_from_events(events: &[Event]) -> String {
 }
 
 
-fn get_sorted_log_stream_names(log_group: &str) -> Result<Vec<String>, String> {
+async fn get_sorted_log_stream_names(client: &aws_sdk_cloudwatchlogs::Client, log_group:&str) -> Result<Vec<String>, String> {
+    let mut log_stream_names: Vec<String> = Vec::new();
+    let mut next_token: Option<String> = None;
+    loop {
+        let mut request = client.describe_log_streams();
+        request = request.log_group_name(log_group);
+        if let Some(ref token) = next_token {
+            request = request.next_token(token);
+        }
+        let response = request.send().await.unwrap();
+        let log_streams_option = response.log_streams;
+        // TODO could this end up abandoning a partially built result we actually would like to return?
+        if log_streams_option.is_none() {
+            return Err("log_streams_option is None".to_string());
+        } else {
+            let log_streams = log_streams_option.unwrap();
+            let mut names = log_streams
+                .into_iter()
+                .map(|stream| stream.log_stream_name.unwrap())
+                .collect::<Vec<String>>();
+            log_stream_names.append(&mut names);
+        }
+        next_token = response.next_token;
+        if next_token.is_none() {
+            break;
+        }
+    }
+    log_stream_names.sort(); // Sorts alphabetically by default
+    Ok(log_stream_names)
+}
+
+fn get_sorted_log_stream_names_old(log_group: &str) -> Result<Vec<String>, String> {
     let mut cmd = Command::new("aws");
     cmd.args(&[
         "logs",
@@ -343,14 +374,14 @@ async fn main() {
             println!("--log-group is required when using --describe-log-streams");
             return;
         }
-        let log_stream_names = get_sorted_log_stream_names(&log_group).unwrap_or_else(|e| {
+        let log_stream_names = get_sorted_log_stream_names(client, &log_group).await.unwrap_or_else(|e| {
             println!("Error: {}", e);
             std::process::exit(1);
         });
         let mut logstream_previews: HashMap<String, String> = HashMap::new();
         if args.preview {
             // get the first 10 lines from each log stream of the last few log streams
-            let preview_amount = 9999999999999;
+            let preview_amount = 6;
             let preview_log_stream_names = log_stream_names
                 .iter()
                 .rev()
