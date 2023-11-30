@@ -99,7 +99,7 @@ async fn fetch_single_log_page(
 ) -> Result<EventLog, String> {
     let token_disp = fwd_token.unwrap_or("None");
     let limit_disp = limit.unwrap_or(-1);
-    println!("fetch single log page for: {log_stream}, token: {}, limit: {}", token_disp, limit_disp);
+    debug!("fetch single log page for: {log_stream}, token: {}, limit: {}", token_disp, limit_disp);
     let mut bld = client.get_log_events()
         .log_stream_name(log_stream)
         .log_group_name(log_group)
@@ -242,20 +242,36 @@ async fn get_cloudwatch_client() -> aws_sdk_cloudwatchlogs::Client {
 }
 
 async fn get_sorted_log_group_names(client: &aws_sdk_cloudwatchlogs::Client) -> Result<Vec<String>, String> {
-    let log_groups_output = client.describe_log_groups().send().await.unwrap();
-    let log_groups_option = log_groups_output.log_groups;
-    if log_groups_option.is_none() {
-        return Err("log_groups_option is None".to_string());
-    } else {
+    let mut all_group_names: Vec<String> = vec![];
+    let mut next_token: Option<String> = None;
+    let max_iters = 100;
+    let mut i = 0;
+    loop {
+        debug!("fetch log groups, iter: {i}");
+        //let log_groups_output = client.describe_log_groups().send().await.unwrap();
+        let mut bld = client.describe_log_groups();
+        if next_token.is_some() {
+            bld = bld.next_token(next_token.unwrap());
+        }
+        let log_groups_output = bld.send().await.unwrap();
+        next_token = log_groups_output.next_token;
         // get all log group names sorted by alphabetical
-        let mut log_group_names: Vec<String> = log_groups_option
+        let mut log_group_names: Vec<String> = log_groups_output.log_groups
             .unwrap()
             .into_iter()
             .map(|group| group.log_group_name.unwrap())
             .collect();
-        log_group_names.sort(); // Sorts alphabetically by default
-        Ok(log_group_names)
+        all_group_names.append(&mut log_group_names);
+        if next_token.is_none() {
+            break;
+        }
+        i += 1;
+        if i > max_iters {
+            return Err("max iterations exceeded".to_string());
+        }
     }
+    all_group_names.sort();
+    Ok(all_group_names)
 }
 
 #[tokio::main]
