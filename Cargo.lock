@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "rust-aws-logs"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "aws-config",
  "aws-sdk-cloudwatchlogs",

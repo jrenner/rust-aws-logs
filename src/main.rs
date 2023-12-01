@@ -204,7 +204,7 @@ fn get_text_from_events(events: &[Event]) -> String {
 
 
 async fn get_sorted_log_stream_names(client: &aws_sdk_cloudwatchlogs::Client, log_group:&str) -> Result<Vec<String>, String> {
-    let mut log_stream_names: Vec<String> = Vec::new();
+    let mut all_log_streams = vec![];
     let mut next_token: Option<String> = None;
     loop {
         let mut request = client.describe_log_streams();
@@ -219,19 +219,20 @@ async fn get_sorted_log_stream_names(client: &aws_sdk_cloudwatchlogs::Client, lo
             return Err("log_streams_option is None".to_string());
         } else {
             let log_streams = log_streams_option.unwrap();
-            let mut names = log_streams
-                .into_iter()
-                .map(|stream| stream.log_stream_name.unwrap())
-                .collect::<Vec<String>>();
-            log_stream_names.append(&mut names);
+            all_log_streams.extend(log_streams);
         }
         next_token = response.next_token;
         if next_token.is_none() {
             break;
         }
     }
-    log_stream_names.sort(); // Sorts alphabetically by default
-    Ok(log_stream_names)
+    // sort all_log_streams by creation time
+    all_log_streams.sort_by(|a, b| a.creation_time.cmp(&b.creation_time));
+    let names = all_log_streams
+        .into_iter()
+        .map(|stream| stream.log_stream_name.unwrap())
+        .collect::<Vec<String>>();
+    Ok(names)
 }
 
 async fn get_cloudwatch_client() -> aws_sdk_cloudwatchlogs::Client {
