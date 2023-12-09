@@ -202,6 +202,7 @@ async fn fetch_entire_log(
         info!("fetched single page TAIL, limit was: {limit}");
     } else {
         // no tail... just regular full log fetch
+        let mut size_zero_pages_in_a_row = 0;
         loop {
             let limit: Option<i32> = None;
             let event_log: EventLog = fetch_single_log_page(
@@ -217,7 +218,12 @@ async fn fetch_entire_log(
             // append all the events to all_events
             let page_size = event_log.events.len();
             if page_size == 0 {
-                debug!("page size is 0, break loop");
+                size_zero_pages_in_a_row += 1;
+            } else {
+                size_zero_pages_in_a_row = 0;
+            }
+            if size_zero_pages_in_a_row >= 3 {
+                debug!("page size is 0 multiple times in a row, break loop");
                 break;
             }
             all_events.extend(event_log.events);
