@@ -1,9 +1,9 @@
-use std::collections::HashMap;
 use clap::Parser;
+use std::collections::HashMap;
 
+use aws_config::BehaviorVersion;
 use serde::{Deserialize, Serialize};
 use std::str;
-use aws_config::BehaviorVersion;
 
 use log::{debug, info};
 
@@ -37,6 +37,10 @@ struct Args {
     /// get previews of the log streams when listing log groups, up to N most recent streams
     #[arg(long, default_value_t = 0)]
     preview_streams: u32,
+
+    /// view just the last N lines
+    #[arg(short, long)]
+    tail: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -96,11 +100,16 @@ async fn fetch_single_log_page(
     log_stream: &str,
     fwd_token: Option<&str>,
     limit: Option<i32>,
+    from_tail: Option<bool>,
 ) -> Result<EventLog, String> {
     let token_disp = fwd_token.unwrap_or("None");
     let limit_disp = limit.unwrap_or(-1);
-    debug!("fetch single log page for: {log_stream}, token: {}, limit: {}", token_disp, limit_disp);
-    let mut bld = client.get_log_events()
+    debug!(
+        "fetch single log page for: {log_stream}, token: {}, limit: {}",
+        token_disp, limit_disp
+    );
+    let mut bld = client
+        .get_log_events()
         .log_stream_name(log_stream)
         .log_group_name(log_group)
         .start_from_head(true);
@@ -111,18 +120,24 @@ async fn fetch_single_log_page(
     if let Some(lmt) = limit {
         bld = bld.limit(lmt);
     }
+    if let Some(tail) = from_tail {
+        bld = bld.start_from_head(!tail);
+    }
     let response = bld.send().await.unwrap();
     let events = response.events.unwrap();
-    let my_events = events.into_iter().map(|event| {
-        let timestamp = event.timestamp.unwrap();
-        let message = event.message.unwrap();
-        let ingestion_time = event.ingestion_time.unwrap();
-        Event {
-            timestamp,
-            message,
-            ingestion_time,
-        }
-    }).collect::<Vec<Event>>();
+    let my_events = events
+        .into_iter()
+        .map(|event| {
+            let timestamp = event.timestamp.unwrap();
+            let message = event.message.unwrap();
+            let ingestion_time = event.ingestion_time.unwrap();
+            Event {
+                timestamp,
+                message,
+                ingestion_time,
+            }
+        })
+        .collect::<Vec<Event>>();
     let eventlog: EventLog = EventLog {
         events: my_events,
         next_forward_token: response.next_forward_token.unwrap(),
@@ -131,15 +146,19 @@ async fn fetch_single_log_page(
     Ok(eventlog)
 }
 
-
-async fn fetch_first_n_events(client: &aws_sdk_cloudwatchlogs::Client, log_group: &str, log_stream: &str, limit: i32) -> Vec<Event> {
+async fn fetch_first_n_events(
+    client: &aws_sdk_cloudwatchlogs::Client,
+    log_group: &str,
+    log_stream: &str,
+    limit: i32,
+) -> Vec<Event> {
     if log_stream.starts_with("/") {
         panic!("log_stream should probably not begin with / -> {log_stream}");
     }
     info!("fetch first N events from log stream - log_group: {log_group}, log_stream: {log_stream}, limit: {limit}");
     let fwd_token: Option<&str> = None;
     let event_log: EventLog =
-        fetch_single_log_page(client, &log_group, &log_stream, fwd_token, Some(limit))
+        fetch_single_log_page(client, &log_group, &log_stream, fwd_token, Some(limit), None)
             .await
             .unwrap_or_else(|e| panic!("failed to fetch single log page: {}", e));
     // append all the events to all_events
@@ -150,7 +169,12 @@ async fn fetch_first_n_events(client: &aws_sdk_cloudwatchlogs::Client, log_group
     all_events
 }
 
-async fn fetch_entire_log(client: &aws_sdk_cloudwatchlogs::Client, log_group: &str, log_stream: &str) -> Vec<Event> {
+async fn fetch_entire_log(
+    client: &aws_sdk_cloudwatchlogs::Client,
+    log_group: &str,
+    log_stream: &str,
+    tail: Option<u32>,
+) -> Vec<Event> {
     if log_stream.starts_with("/") {
         panic!("log_stream should probably not begin with / -> {log_stream}");
     }
@@ -159,34 +183,60 @@ async fn fetch_entire_log(client: &aws_sdk_cloudwatchlogs::Client, log_group: &s
     let mut i = 0;
     let mut current_token: Option<String> = None;
     let mut all_events = Vec::new();
-    loop {
-        let limit: Option<i32> = None;
-        let event_log: EventLog =
-            fetch_single_log_page(client, &log_group, &log_stream, current_token.as_deref(), limit)
-                .await
-                .unwrap_or_else(|e| panic!("failed to fetch single log page: {}", e));
-        // append all the events to all_events
-        let page_size = event_log.events.len();
-        if page_size == 0 {
-            debug!("page size is 0, break loop");
-            break;
-        }
+
+    if let Some(tail_num) = tail {
+        // tail arg... just fetch single page, and from tail (not head)
+        // still apply event number limit, but take from tail arg
+        let limit = tail_num as i32;
+        let event_log: EventLog = fetch_single_log_page(
+            client,
+            &log_group,
+            &log_stream,
+            None,
+            Some(limit),
+            Some(true),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("failed to fetch single log page: {}", e));
         all_events.extend(event_log.events);
-        let forward_token: &str = &event_log.next_forward_token;
-        // check if current token is the same as this new forward token
-        let backward_token = event_log.next_backward_token;
-
-        debug!("[{i}] forward_token: {forward_token}, backward_token: {backward_token}");
-        let n = i + 1;
-        info!("fetched page {n}, size: {page_size}");
-
-        if let Some(ref ct) = current_token {
-            if ct == &forward_token {
+        info!("fetched single page TAIL, limit was: {limit}");
+    } else {
+        // no tail... just regular full log fetch
+        loop {
+            let limit: Option<i32> = None;
+            let event_log: EventLog = fetch_single_log_page(
+                client,
+                &log_group,
+                &log_stream,
+                current_token.as_deref(),
+                limit,
+                None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("failed to fetch single log page: {}", e));
+            // append all the events to all_events
+            let page_size = event_log.events.len();
+            if page_size == 0 {
+                debug!("page size is 0, break loop");
                 break;
             }
+            all_events.extend(event_log.events);
+            let forward_token: &str = &event_log.next_forward_token;
+            // check if current token is the same as this new forward token
+            let backward_token = event_log.next_backward_token;
+
+            debug!("[{i}] forward_token: {forward_token}, backward_token: {backward_token}");
+            let n = i + 1;
+            info!("fetched page {n}, size: {page_size}");
+
+            if let Some(ref ct) = current_token {
+                if ct == &forward_token {
+                    break;
+                }
+            }
+            current_token = Some(forward_token.to_string());
+            i += 1;
         }
-        current_token = Some(forward_token.to_string());
-        i += 1;
     }
     // sort all the events based on timestamp, just in case they are out of order
     all_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
@@ -202,8 +252,10 @@ fn get_text_from_events(events: &[Event]) -> String {
     text
 }
 
-
-async fn get_sorted_log_stream_names(client: &aws_sdk_cloudwatchlogs::Client, log_group:&str) -> Result<Vec<String>, String> {
+async fn get_sorted_log_stream_names(
+    client: &aws_sdk_cloudwatchlogs::Client,
+    log_group: &str,
+) -> Result<Vec<String>, String> {
     let mut all_log_streams = vec![];
     let mut next_token: Option<String> = None;
     loop {
@@ -236,13 +288,14 @@ async fn get_sorted_log_stream_names(client: &aws_sdk_cloudwatchlogs::Client, lo
 }
 
 async fn get_cloudwatch_client() -> aws_sdk_cloudwatchlogs::Client {
-    let config =
-        aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
+    let config = aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
     let client = aws_sdk_cloudwatchlogs::Client::new(&config);
     client
 }
 
-async fn get_sorted_log_group_names(client: &aws_sdk_cloudwatchlogs::Client) -> Result<Vec<String>, String> {
+async fn get_sorted_log_group_names(
+    client: &aws_sdk_cloudwatchlogs::Client,
+) -> Result<Vec<String>, String> {
     let mut all_group_names: Vec<String> = vec![];
     let mut next_token: Option<String> = None;
     let max_iters = 100;
@@ -257,7 +310,8 @@ async fn get_sorted_log_group_names(client: &aws_sdk_cloudwatchlogs::Client) -> 
         let log_groups_output = bld.send().await.unwrap();
         next_token = log_groups_output.next_token;
         // get all log group names sorted by alphabetical
-        let mut log_group_names: Vec<String> = log_groups_output.log_groups
+        let mut log_group_names: Vec<String> = log_groups_output
+            .log_groups
             .unwrap()
             .into_iter()
             .map(|group| group.log_group_name.unwrap())
@@ -296,10 +350,12 @@ async fn main() {
             println!("--log-group is required when using --describe-log-streams");
             return;
         }
-        let log_stream_names = get_sorted_log_stream_names(client, &log_group).await.unwrap_or_else(|e| {
-            println!("Error: {}", e);
-            std::process::exit(1);
-        });
+        let log_stream_names = get_sorted_log_stream_names(client, &log_group)
+            .await
+            .unwrap_or_else(|e| {
+                println!("Error: {}", e);
+                std::process::exit(1);
+            });
         let mut logstream_previews: HashMap<String, String> = HashMap::new();
         let preview_requested = args.preview_lines > 0;
         if preview_requested {
@@ -323,7 +379,12 @@ async fn main() {
                 .collect::<Vec<&str>>();
             let mut preview_futures = vec![];
             for log_stream_name in preview_log_stream_names.clone() {
-                let future = fetch_first_n_events(client, &log_group, log_stream_name, preview_event_count as i32);
+                let future = fetch_first_n_events(
+                    client,
+                    &log_group,
+                    log_stream_name,
+                    preview_event_count as i32,
+                );
                 preview_futures.push(future);
             }
             let fut_results = futures::future::join_all(preview_futures).await;
@@ -334,7 +395,6 @@ async fn main() {
                 let text = get_text_from_events(&events);
                 logstream_previews.insert(log_stream_name.to_string(), text);
             }
-
         }
         println!("Log Streams (log group: {log_group}):");
         for name in log_stream_names {
@@ -354,7 +414,8 @@ async fn main() {
     }
 
     let log_stream = args.log_stream.expect("log-stream argument not supplied");
-    let events: Vec<Event> = fetch_entire_log(client, &log_group, &log_stream).await;
+    let tail: Option<u32> = args.tail;
+    let events: Vec<Event> = fetch_entire_log(client, &log_group, &log_stream, tail).await;
     let full_log_text = get_text_from_events(&events);
 
     if let Some(fpath) = args.output_file {
