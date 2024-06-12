@@ -270,7 +270,7 @@ async fn get_sorted_log_stream_names(
         if let Some(ref token) = next_token {
             request = request.next_token(token);
         }
-        let response = request.send().await.unwrap();
+        let response = request.send().await.expect("failed to fetch log streams");
         let log_streams_option = response.log_streams;
         // TODO could this end up abandoning a partially built result we actually would like to return?
         if log_streams_option.is_none() {
@@ -294,7 +294,7 @@ async fn get_sorted_log_stream_names(
 }
 
 async fn get_cloudwatch_client() -> aws_sdk_cloudwatchlogs::Client {
-    let config = aws_config::load_defaults(BehaviorVersion::v2023_11_09()).await;
+    let config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
     let client = aws_sdk_cloudwatchlogs::Client::new(&config);
     client
 }
